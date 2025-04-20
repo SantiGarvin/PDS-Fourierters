@@ -1,104 +1,143 @@
 import librosa
-from scipy.spatial.distance import euclidean, cosine # Importar cosine
+import librosa.effects
+from scipy.spatial.distance import cosine
 import numpy as np
-import logging # Añadir logging
+import logging
 
 # --- Constantes de Configuración ---
 DEFAULT_SR = 16000      # Frecuencia de muestreo por defecto
-N_MFCC = 13             # Número de coeficientes MFCC a extraer
-HOP_LENGTH = 512        # Salto entre ventanas para MFCC (librosa default)
-N_FFT = 2048            # Tamaño de la FFT para MFCC (librosa default)
+N_MFCC = 13             # Número de coeficientes MFCC base a extraer
+HOP_LENGTH = 512        # Salto entre ventanas para MFCC
+N_FFT = 2048            # Tamaño de la FFT para MFCC
+
+# Parámetros para el recorte de silencio simple basado en energía
+SILENCE_THRESHOLD_DB = 40 # Umbral en dB por debajo del pico máximo para considerar silencio. AJUSTAR si es necesario.
 
 # Umbral para la distancia coseno. Valores más *pequeños* indican mayor similitud.
-# (Cosine distance = 1 - cosine similarity). Un valor típico para match puede ser < 0.4 o 0.5
-# ¡Este valor probablemente necesite ser ajustado empíricamente!
-COSINE_THRESHOLD = 0.4
+# AHORA LA HUELLA ES MÁS GRANDE (MFCC+Delta+Delta2, Mean+Std).
+# ¡¡¡ESTE UMBRAL NECESITARÁ SER REAJUSTADO SIGNIFICATIVAMENTE!!!
+# Empezar probando valores entre 0.4 y 0.7 quizás.
+COSINE_THRESHOLD = 0.5 # Valor inicial, necesita ajuste empírico.
 
-def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC):
+def normalize_frames(m,epsilon=1e-8):
+    # Normalización por enunciado (CMVN simple): restar la media y dividir por std
+    # m: matriz de características (ej: MFCCs) de tamaño (n_features, n_frames)
+    return (m - np.mean(m, axis=1, keepdims=True)) / (np.std(m, axis=1, keepdims=True) + epsilon)
+
+def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_FFT, hop_length=HOP_LENGTH, silence_thresh=SILENCE_THRESHOLD_DB):
     """
-    Extrae la huella vocal de un audio usando la media y desviación estándar de los MFCCs.
+    Extrae la huella vocal de un audio usando:
+    1. Recorte de silencios iniciales/finales.
+    2. MFCCs, Delta MFCCs, Delta-Delta MFCCs.
+    3. Normalización Cepstral por Enunciado (CMVN simple).
+    4. Media y Desviación Estándar de las características normalizadas.
 
     Args:
         audio_path (str): Ruta del archivo de audio.
-        sr (int, opcional): Frecuencia de muestreo. Por defecto DEFAULT_SR.
-        n_mfcc (int, opcional): Número de coeficientes MFCC. Por defecto N_MFCC.
+        sr (int): Frecuencia de muestreo deseada.
+        n_mfcc (int): Número de coeficientes MFCC base.
+        n_fft (int): Tamaño de la ventana FFT.
+        hop_length (int): Salto de la ventana.
+        silence_thresh (float): Umbral en dB para el recorte de silencio.
 
     Returns:
-        np.ndarray: Vector de características concatenando la media y la desviación estándar
-                    de cada coeficiente MFCC, o None si ocurre un error.
+        np.ndarray: Vector de características (huella vocal) concatenado,
+                    o None si ocurre un error o el audio es demasiado corto/silencioso.
     """
     try:
-        # Cargar audio con la frecuencia de muestreo especificada
+        # 1. Cargar audio
         y, current_sr = librosa.load(audio_path, sr=sr)
 
-        # Verificar si el audio es muy corto o está vacío
-        if len(y) < N_FFT: # Si es más corto que una ventana FFT, MFCC fallará o será inválido
-             logging.warning(f"Audio en {audio_path} es demasiado corto para extraer características.")
+        # 2. Recorte de silencios iniciales/finales
+        y_trimmed, index = librosa.effects.trim(y, top_db=silence_thresh, frame_length=n_fft, hop_length=hop_length)
+        logging.info(f"Audio original: {len(y)/current_sr:.2f}s. Recortado: {len(y_trimmed)/current_sr:.2f}s.")
+
+        # Verificar si queda audio después del recorte
+        if len(y_trimmed) < n_fft: # Necesita al menos una ventana FFT
+             logging.warning(f"Audio en {audio_path} es demasiado corto o silencioso después del recorte.")
              return None
 
-        # Extraer los coeficientes MFCC
-        # Usar n_fft y hop_length puede dar más control, pero los defaults suelen funcionar bien
-        mfccs = librosa.feature.mfcc(y=y, sr=current_sr, n_mfcc=n_mfcc, n_fft=N_FFT, hop_length=HOP_LENGTH)
+        # 3. Extraer MFCCs base
+        mfccs = librosa.feature.mfcc(y=y_trimmed, sr=current_sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
 
-        # Verificar si se obtuvieron MFCCs (podría fallar con silencio puro)
-        if mfccs.shape[1] == 0:
-            logging.warning(f"No se pudieron extraer MFCCs de {audio_path} (posiblemente silencio).")
+        # 4. Calcular Deltas y Delta-Deltas
+        delta_mfccs = librosa.feature.delta(mfccs)
+        delta2_mfccs = librosa.feature.delta(mfccs, order=2)
+
+        # Verificar si se obtuvieron suficientes frames
+        if mfccs.shape[1] == 0 or delta_mfccs.shape[1] == 0 or delta2_mfccs.shape[1] == 0:
+            logging.warning(f"No se pudieron extraer suficientes frames de características de {audio_path}.")
             return None
 
-        # Calcular la media y desviación estándar de cada coeficiente
-        mean_mfccs = np.mean(mfccs, axis=1)
-        std_mfccs = np.std(mfccs, axis=1)
+        # 5. Aplicar Normalización Cepstral (CMVN por enunciado simple)
+        mfccs_norm = normalize_frames(mfccs)
+        delta_mfccs_norm = normalize_frames(delta_mfccs)
+        delta2_mfccs_norm = normalize_frames(delta2_mfccs)
 
-        # Concatenar media y std para formar la huella vocal
-        fingerprint = np.concatenate((mean_mfccs, std_mfccs))
+        # 6. Calcular Media y Desviación Estándar de cada tipo de característica normalizada
+        mean_mfccs = np.mean(mfccs_norm, axis=1)
+        std_mfccs = np.std(mfccs_norm, axis=1)
+        mean_delta = np.mean(delta_mfccs_norm, axis=1)
+        std_delta = np.std(delta_mfccs_norm, axis=1)
+        mean_delta2 = np.mean(delta2_mfccs_norm, axis=1)
+        std_delta2 = np.std(delta2_mfccs_norm, axis=1)
+
+        # 7. Concatenar todo en una única huella vocal
+        # Tamaño: (n_mfcc * 2) + (n_mfcc * 2) + (n_mfcc * 2) = n_mfcc * 6
+        fingerprint = np.concatenate((
+            mean_mfccs, std_mfccs,
+            mean_delta, std_delta,
+            mean_delta2, std_delta2
+        ))
+
+        # Verificar si hay NaNs (podría ocurrir si std es cero en normalize_frames)
+        if np.isnan(fingerprint).any():
+            logging.error(f"NaN detectado en la huella final de {audio_path}. Posiblemente audio constante o muy corto.")
+            return None
 
         return fingerprint
 
     except Exception as e:
-        logging.error(f"Error al procesar {audio_path}: {e}")
-        # Podrías querer manejar tipos específicos de excepciones de librosa aquí
+        logging.error(f"Error al procesar {audio_path}: {e}", exc_info=True) # Añadir stack trace al log
         return None # Devolver None para indicar fallo
 
+
+# La función de comparación no necesita cambios, pero el UMBRAL sí.
 def compare_vocal_fingerprints(fp1, fp2, threshold=COSINE_THRESHOLD):
     """
-    Compara dos huellas vocales utilizando la distancia Coseno.
+    Compara dos huellas vocales (MFCC+Delta+Delta2, Mean+Std) usando la distancia Coseno.
 
     Args:
-        fp1 (np.ndarray): Primera huella vocal (media + std MFCCs).
-        fp2 (np.ndarray): Segunda huella vocal (media + std MFCCs).
+        fp1 (np.ndarray): Primera huella vocal.
+        fp2 (np.ndarray): Segunda huella vocal.
         threshold (float, opcional): Umbral de decisión para la distancia Coseno.
-                                     Valores más *bajos* indican mayor similitud.
-                                     Por defecto es COSINE_THRESHOLD.
+                                     ¡¡NECESITA AJUSTE EMPÍRICO!!
 
     Returns:
-        tuple:
-            - bool: True si la distancia es menor que el umbral (misma persona), False en caso contrario.
-            - float: Valor de la distancia Coseno calculada.
-    Nota:
-        - La distancia Coseno varía entre 0 (vectores idénticos) y 2 (vectores opuestos).
-        - Un valor de 1 indica ortogonalidad.
-        - Se espera que huellas de la misma persona tengan una distancia coseno baja (< threshold).
+        tuple: (bool: verified, float: distance)
     """
-    if fp1 is None or fp2 is None or fp1.shape != fp2.shape:
-         logging.error("Comparación fallida: Huellas inválidas o con formas diferentes.")
-         # Devolver False y una distancia 'infinita' o muy grande para indicar fallo/no coincidencia
-         return False, np.inf # O 2.0, que es el máximo teórico de la distancia coseno
+    if fp1 is None or fp2 is None:
+        logging.error("Comparación fallida: Al menos una huella es None.")
+        return False, np.inf
+    if fp1.shape != fp2.shape:
+         logging.error(f"Comparación fallida: Huellas con formas diferentes. {fp1.shape} vs {fp2.shape}")
+         return False, np.inf
 
-    # Asegurarse de que los vectores no sean nulos (lo que daría NaN en cosine)
+    # Evitar división por cero en cosine si alguna huella es toda ceros (improbable pero posible)
     if np.all(fp1 == 0) or np.all(fp2 == 0):
         logging.warning("Comparación con vector cero detectada.")
-        # Si ambos son cero, son 'iguales' (distancia 0), si uno es cero y otro no, son muy diferentes (distancia 1 o más)
-        # La función cosine maneja esto, pero podemos ser explícitos si queremos.
-        # Por simplicidad, dejamos que 'cosine' lo maneje (puede dar NaN si la norma es 0).
-        # O podemos devolver directamente:
-        # return np.all(fp1 == 0) and np.all(fp2 == 0), 1.0 if (np.all(fp1==0) ^ np.all(fp2==0)) else 0.0
+        # Si ambos son cero, son "idénticos" (distancia 0). Si uno es cero y otro no, son máximamente diferentes (distancia 1 en similitud coseno, o >1 en distancia).
+        # La función 'cosine' devuelve 1 si uno es cero y el otro no.
+        distance = cosine(fp1, fp2) # Puede ser 0.0, 1.0, o NaN si ambos son 0
+        if np.isnan(distance): distance = 0.0 # Si ambos son 0, consideramos distancia 0
+    else:
+        distance = cosine(fp1, fp2)
 
-    distance = cosine(fp1, fp2)
-
-    # Manejar posible NaN si alguna norma es cero (aunque improbable con MFCCs reales)
+    # Manejar posible NaN residual (aunque menos probable ahora)
     if np.isnan(distance):
         logging.warning("Distancia Coseno resultó en NaN.")
-        return False, np.inf # Tratar NaN como no coincidencia
+        return False, np.inf
 
     verified = distance < threshold
-    return verified, float(distance) # Asegurar que la distancia es un float estándar
+    logging.debug(f"Distancia Coseno calculada: {distance:.4f}, Umbral: {threshold}, Verificado: {verified}")
+    return verified, float(distance)
