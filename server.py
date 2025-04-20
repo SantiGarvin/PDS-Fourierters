@@ -7,6 +7,8 @@ import asv
 import json
 import logging
 import numpy as np
+import tempfile
+import shutil
 
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO)
@@ -146,7 +148,12 @@ def verify():
     # MEJORA PENDIENTE: Usar un archivo temporal seguro
     test_audio_path = "temp_verify.wav" # Cambiado para evitar colisión con registro si falla
     try:
-        file.save(test_audio_path)
+        # Crear un archivo temporal con extensión .wav
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            test_audio_path = tmp_file.name
+            file.save(test_audio_path) # Guardar el contenido del archivo subido en el temporal
+
+        logging.info(f"Audio de verificación guardado temporalmente en: {test_audio_path}")
 
         # Calcular la huella vocal de la nueva muestra de audio
         test_fingerprint = asv.compute_vocal_fingerprint(test_audio_path)
@@ -165,7 +172,8 @@ def verify():
         # Limpiar el archivo temporal después de usarlo
         if os.path.exists(test_audio_path):
             os.remove(test_audio_path)
-
+            logging.info(f"Archivo temporal {test_audio_path} eliminado.")
+            
         return jsonify({"verified": verified_bool, "distance": distance_float})
 
     except FileNotFoundError:
@@ -173,14 +181,22 @@ def verify():
          return jsonify({"error": "Error interno del servidor al manejar el archivo"}), 500
     except Exception as e:
         logging.error(f"Error durante la verificación para {user_id}: {e}")
-         # Limpiar el archivo temporal si existe y ocurrió un error
+        # Eliminar el archivo de audio temporal si falla el procesamiento
         if os.path.exists(test_audio_path):
             try:
                 os.remove(test_audio_path)
+                logging.warning(f"Archivo temporal {test_audio_path} eliminado debido a error de procesamiento.")
             except OSError as rm_err:
-                logging.error(f"Error al limpiar {test_audio_path} tras error: {rm_err}")
-        return jsonify({"error": "Error interno al procesar la verificación"}), 500
+                logging.error(f"Error al intentar eliminar {test_audio_path}: {rm_err}")
 
+        # Asegurarse de limpiar el archivo temporal también en caso de error
+        if 'test_audio_path' in locals() and os.path.exists(test_audio_path):
+            try:
+                os.remove(test_audio_path)
+                logging.warning(f"Archivo temporal {test_audio_path} eliminado tras error.")
+            except OSError as rm_err:
+                logging.error(f"Error al intentar eliminar {test_audio_path} tras error: {rm_err}")
+        return jsonify({"error": "Error interno al procesar la verificación"}), 500
 
 if __name__ == "__main__":
     # debug=True es útil para desarrollo, pero recuerda quitarlo para producción
