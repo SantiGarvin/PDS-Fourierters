@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Biometría de Voz</title>
-  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.2.0/css/all.min.css" integrity="sha512-..." crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.2.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <script src="https://cdn.jsdelivr.net/gh/mattdiamond/Recorderjs@master/dist/recorder.js"></script>
   <script src="https://unpkg.com/wavesurfer.js"></script>
   <style>
     body { font-family: 'Roboto', sans-serif; background: #f4f7fa; }
@@ -85,30 +86,38 @@
       height: 80
     });
 
-    let mediaRecorder, audioChunks = [], audioBlob;
+    let audioBlob = null;
+    let rec = null;
+    let gumStream = null;
 
     function toggleRecording(action) {
       const btn = document.getElementById(`record${action.charAt(0).toUpperCase() + action.slice(1)}`);
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-        btn.classList.remove('recording');
+
+      if (rec && rec.recording) {
+        rec.stop();
+        gumStream.getAudioTracks()[0].stop();
         btn.innerHTML = '<i class="fas fa-circle"></i> Grabar';
+
+        rec.exportWAV(blob => {
+          audioBlob = blob;
+          const url = URL.createObjectURL(blob);
+          wavesurfer.load(url);
+          const audio = document.getElementById('audioPlayback');
+          audio.src = url;
+          audio.hidden = false;
+        });
+
       } else {
         navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-          mediaRecorder = new MediaRecorder(stream);
-          audioChunks = [];
-          mediaRecorder.start();
-          btn.classList.add('recording');
+          const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          gumStream = stream;
+          const input = audioContext.createMediaStreamSource(stream);
+          rec = new Recorder(input, { numChannels: 1 });
+          rec.record();
           btn.innerHTML = '<i class="fas fa-stop"></i> Detener';
-
-          mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-          mediaRecorder.onstop = () => {
-            audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-            const url = URL.createObjectURL(audioBlob);
-            wavesurfer.load(url);
-            document.getElementById('audioPlayback').src = url;
-            document.getElementById('audioPlayback').hidden = false;
-          };
+        }).catch(err => {
+          console.error("Error al acceder al micrófono:", err);
+          alert("No se pudo acceder al micrófono");
         });
       }
     }
@@ -123,7 +132,10 @@
       formData.append('audio', audioBlob, 'audio.wav');
 
       try {
-        const res = await fetch(`/api/${action}`, { method: 'POST', body: formData });
+        const res = await fetch(`/${action}`, {
+          method: 'POST',
+          body: formData
+        });
         const data = await res.json();
         document.getElementById('result').value = data.verified !== undefined
           ? (data.verified ? '✅ Verificado' : '❌ No coincide')
