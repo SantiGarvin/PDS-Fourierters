@@ -4,6 +4,10 @@ from scipy.spatial.distance import cosine
 import numpy as np
 import logging
 
+import soundfile as sf
+
+
+
 # --- Constantes de Configuración ---
 DEFAULT_SR = 16000      # Frecuencia de muestreo por defecto
 N_MFCC = 13             # Número de coeficientes MFCC base a extraer
@@ -46,7 +50,12 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
     """
     try:
         # 1. Cargar audio
-        y, current_sr = librosa.load(audio_path, sr=sr)
+        y, file_sr = sf.read(audio_path)
+        if y.ndim > 1:
+            y = y.mean(axis=1)  # convertir a mono
+        if file_sr != sr:
+            y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
+        current_sr = sr
 
         # 2. Recorte de silencios iniciales/finales
         y_trimmed, index = librosa.effects.trim(y, top_db=silence_thresh, frame_length=n_fft, hop_length=hop_length)
