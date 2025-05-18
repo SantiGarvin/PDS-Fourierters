@@ -35,51 +35,18 @@ def bandpass_filter(y, sr, low=300, high=3400, order=4):
     b, a = butter(order, [low/nyq, high/nyq], btype='band')
     return lfilter(b, a, y)
 
-def extract_features(y, sr):
-    """
-    1) Filtro pasa‑banda
-    2) Recorte de silencios
-    3) MFCC + delta + delta2 + CMVN + media+std → fingerprint
-    """
-    # 1) Filtrado
-    y = bandpass_filter(y, sr)
-
-    # 2) Recorte de silencios
-    y_trimmed, _ = librosa.effects.trim(
-        y,
-        top_db=SILENCE_THRESHOLD_DB,
-        frame_length=N_FFT,
-        hop_length=HOP_LENGTH
-    )
-    if len(y_trimmed) < N_FFT:
-        return None
-
-    # 3) Extracción MFCCs
-    mfccs = librosa.feature.mfcc(
-        y=y_trimmed,
-        sr=sr,
-        n_mfcc=N_MFCC,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH
-    )
-    delta = librosa.feature.delta(mfccs)
-    delta2 = librosa.feature.delta(mfccs, order=2)
-
-    # 4) CMVN
-    mfccs = normalize_frames(mfccs)
-    delta = normalize_frames(delta)
-    delta2 = normalize_frames(delta2)
-
-    # 5) Media y desviación
-    mean_m = np.mean(mfccs, axis=1)
-    std_m  = np.std(mfccs, axis=1)
-    mean_d = np.mean(delta, axis=1)
-    std_d  = np.std(delta, axis=1)
-    mean_d2= np.mean(delta2, axis=1)
-    std_d2 = np.std(delta2, axis=1)
-
-    return np.concatenate([mean_m, std_m, mean_d, std_d, mean_d2, std_d2])
-
+# Reducción de ruido espectral (Spectral Subtraction) 
+def reduce_noise(y, sr, n_fft=N_FFT, hop_length=HOP_LENGTH, noise_duration=0.5, prop_decrease=1.0):
+    stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    mag, phase = np.abs(stft), np.angle(stft)
+    # Número de frames para estimar ruido
+    n_noise = int(noise_duration * sr / hop_length)
+    noise_mag = np.mean(mag[:, :n_noise], axis=1, keepdims=True)
+    # Subtracción y clamp
+    mag_clean = np.maximum(mag - prop_decrease * noise_mag, 0.0)
+    # Reconstrucción
+    stft_clean = mag_clean * np.exp(1j*phase)
+    return librosa.istft(stft_clean, hop_length=hop_length)
 
 
 def normalize_frames(m,epsilon=1e-8):
@@ -116,10 +83,17 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
             y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
         current_sr = sr
         
-        # 2. Aplicamos el filtro de banda
+        # 2. Reducción de ruido
+        y = reduce_noise(y, sr,
+                         n_fft=n_fft,
+                         hop_length=hop_length,
+                         noise_duration=0.5,
+                         prop_decrease=1.0)
+        
+        # 3. Aplicamos el filtro de banda
         y = bandpass_filter(y, current_sr)
 
-        # 3. Recorte de silencios iniciales/finales
+        # 4. Recorte de silencios iniciales/finales
         y_trimmed, index = librosa.effects.trim(y, top_db=silence_thresh, frame_length=n_fft, hop_length=hop_length)
         logging.info(f"Audio original: {len(y)/current_sr:.2f}s. Recortado: {len(y_trimmed)/current_sr:.2f}s.")
 
@@ -128,10 +102,10 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
              logging.warning(f"Audio en {audio_path} es demasiado corto o silencioso después del recorte.")
              return None
 
-        # 4. Extraer MFCCs base
+        # 5. Extraer MFCCs base
         mfccs = librosa.feature.mfcc(y=y_trimmed, sr=current_sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
 
-        # 5. Calcular Deltas y Delta-Deltas
+        # 6. Calcular Deltas y Delta-Deltas
         delta_mfccs = librosa.feature.delta(mfccs)
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
 
@@ -140,12 +114,12 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
             logging.warning(f"No se pudieron extraer suficientes frames de características de {audio_path}.")
             return None
 
-        # 6. Aplicar Normalización Cepstral (CMVN por enunciado simple)
+        # 7. Aplicar Normalización Cepstral (CMVN por enunciado simple)
         mfccs_norm = normalize_frames(mfccs)
         delta_mfccs_norm = normalize_frames(delta_mfccs)
         delta2_mfccs_norm = normalize_frames(delta2_mfccs)
 
-        # 7. Calcular Media y Desviación Estándar de cada tipo de característica normalizada
+        # 8. Calcular Media y Desviación Estándar de cada tipo de característica normalizada
         mean_mfccs = np.mean(mfccs_norm, axis=1)
         std_mfccs = np.std(mfccs_norm, axis=1)
         mean_delta = np.mean(delta_mfccs_norm, axis=1)
@@ -153,7 +127,7 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
         mean_delta2 = np.mean(delta2_mfccs_norm, axis=1)
         std_delta2 = np.std(delta2_mfccs_norm, axis=1)
 
-        # 8. Concatenar todo en una única huella vocal
+        # 9. Concatenar todo en una única huella vocal
         # Tamaño: (n_mfcc * 2) + (n_mfcc * 2) + (n_mfcc * 2) = n_mfcc * 6
         fingerprint = np.concatenate((
             mean_mfccs, std_mfccs,
