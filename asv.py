@@ -4,6 +4,7 @@ from scipy.spatial.distance import cosine
 import numpy as np
 import logging
 
+
 import soundfile as sf
 
 from scipy.signal import butter, lfilter
@@ -49,6 +50,20 @@ def reduce_noise(y, sr, n_fft=N_FFT, hop_length=HOP_LENGTH, noise_duration=0.5, 
     return librosa.istft(stft_clean, hop_length=hop_length)
 
 
+def apply_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
+    """
+    Usa librosa.effects.split para quedarnos solo con regiones de voz.
+    top_db: umbral en dB para considerar silencio.
+    """
+    intervals = librosa.effects.split(y, top_db=top_db,
+                                       frame_length=frame_length,
+                                       hop_length=hop_length)
+    # Concatenar solo los fragmentos activos
+    return np.concatenate([y[start:end] for start, end in intervals]) if len(intervals) else np.array([])
+
+
+
+
 def normalize_frames(m,epsilon=1e-8):
     # Normalización por enunciado (CMVN simple): restar la media y dividir por std
     # m: matriz de características (ej: MFCCs) de tamaño (n_features, n_frames)
@@ -83,17 +98,26 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
             y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
         current_sr = sr
         
-        # 2. Reducción de ruido
+        # 2. Voice Activity Detection (VAD)
+        y = apply_vad(y, current_sr,
+                      top_db=silence_thresh,
+                      frame_length=n_fft,
+                      hop_length=hop_length)
+        if y.size == 0:
+            logging.warning("VAD eliminó toda la señal.")
+            return None
+        
+        # 3. Reducción de ruido
         y = reduce_noise(y, sr,
                          n_fft=n_fft,
                          hop_length=hop_length,
                          noise_duration=0.5,
                          prop_decrease=1.0)
         
-        # 3. Aplicamos el filtro de banda
+        # 4. Aplicamos el filtro de banda
         y = bandpass_filter(y, current_sr)
 
-        # 4. Recorte de silencios iniciales/finales
+        # 5. Recorte de silencios iniciales/finales
         y_trimmed, index = librosa.effects.trim(y, top_db=silence_thresh, frame_length=n_fft, hop_length=hop_length)
         logging.info(f"Audio original: {len(y)/current_sr:.2f}s. Recortado: {len(y_trimmed)/current_sr:.2f}s.")
 
@@ -102,10 +126,10 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
              logging.warning(f"Audio en {audio_path} es demasiado corto o silencioso después del recorte.")
              return None
 
-        # 5. Extraer MFCCs base
+        # 6. Extraer MFCCs base
         mfccs = librosa.feature.mfcc(y=y_trimmed, sr=current_sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
 
-        # 6. Calcular Deltas y Delta-Deltas
+        # 7. Calcular Deltas y Delta-Deltas
         delta_mfccs = librosa.feature.delta(mfccs)
         delta2_mfccs = librosa.feature.delta(mfccs, order=2)
 
@@ -114,12 +138,12 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
             logging.warning(f"No se pudieron extraer suficientes frames de características de {audio_path}.")
             return None
 
-        # 7. Aplicar Normalización Cepstral (CMVN por enunciado simple)
+        # 8. Aplicar Normalización Cepstral (CMVN por enunciado simple)
         mfccs_norm = normalize_frames(mfccs)
         delta_mfccs_norm = normalize_frames(delta_mfccs)
         delta2_mfccs_norm = normalize_frames(delta2_mfccs)
 
-        # 8. Calcular Media y Desviación Estándar de cada tipo de característica normalizada
+        # 9. Calcular Media y Desviación Estándar de cada tipo de característica normalizada
         mean_mfccs = np.mean(mfccs_norm, axis=1)
         std_mfccs = np.std(mfccs_norm, axis=1)
         mean_delta = np.mean(delta_mfccs_norm, axis=1)
@@ -127,7 +151,7 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
         mean_delta2 = np.mean(delta2_mfccs_norm, axis=1)
         std_delta2 = np.std(delta2_mfccs_norm, axis=1)
 
-        # 9. Concatenar todo en una única huella vocal
+        # 10. Concatenar todo en una única huella vocal
         # Tamaño: (n_mfcc * 2) + (n_mfcc * 2) + (n_mfcc * 2) = n_mfcc * 6
         fingerprint = np.concatenate((
             mean_mfccs, std_mfccs,
