@@ -9,6 +9,8 @@ import logging
 import numpy as np
 import tempfile
 import shutil
+import joblib
+
 
 # --- Configuración ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,6 +48,14 @@ def load_fingerprints():
     except Exception as e: # Captura general para problemas con np.array si los datos son corruptos
         logging.error(f"Error inesperado al procesar huellas desde {FINGERPRINT_DB_FILE}: {e}. Iniciando con registro vacío.")
         reg_user_vocal_fingerprint = {}
+
+
+def load_user_model(user_id):
+    path = os.path.join("models", f"{user_id}_svm.pkl")
+    if os.path.exists(path):
+        return joblib.load(path)
+    else:
+        return None
 
 
 def save_fingerprints():
@@ -176,10 +186,19 @@ def verify():
             # compute_vocal_fingerprint ya logueó el error
              return jsonify({"error": "Error al procesar el audio de verificación"}), 500
 
-        # Comparamos ambas huellas vocales usando la distancia Coseno
-        # Usamos el umbral definido en asv.py (COSINE_THRESHOLD)
-        verified, distance = asv.compare_vocal_fingerprints(registered_fingerprint, test_fingerprint)
 
+        model = load_user_model(user_id)
+
+        if model:
+            score = model.decision_function(test_fingerprint.reshape(1, -1))[0]
+            verified = score > 0  # OneClassSVM: positivo 
+            distance = score      
+        else:
+            # Fallback: usar comparación por coseno si no hay modelo
+            # Comparamos ambas huellas vocales usando la distancia Coseno
+            # Usamos el umbral definido en asv.py (COSINE_THRESHOLD)
+            verified, distance = asv.compare_vocal_fingerprints(registered_fingerprint, test_fingerprint)
+            
         # Asegurarse de que los tipos son serializables para JSON
         verified_bool = bool(verified)
         # Manejar distancia infinita si la comparación falló internamente
