@@ -10,8 +10,6 @@ import soundfile as sf
 from scipy.signal import butter, lfilter
 
 
-
-
 # --- Constantes de Configuración ---
 DEFAULT_SR = 16000      # Frecuencia de muestreo por defecto
 N_MFCC = 13             # Número de coeficientes MFCC base a extraer
@@ -19,13 +17,14 @@ HOP_LENGTH = 512        # Salto entre ventanas para MFCC
 N_FFT = 2048            # Tamaño de la FFT para MFCC
 
 # Parámetros para el recorte de silencio simple basado en energía
-SILENCE_THRESHOLD_DB = 40 # Umbral en dB por debajo del pico máximo para considerar silencio. AJUSTAR si es necesario.
+# Umbral en dB por debajo del pico máximo para considerar silencio. AJUSTAR si es necesario.
+SILENCE_THRESHOLD_DB = 40
 
 # Umbral para la distancia coseno. Valores más *pequeños* indican mayor similitud.
 # AHORA LA HUELLA ES MÁS GRANDE (MFCC+Delta+Delta2, Mean+Std).
 # ¡¡¡ESTE UMBRAL NECESITARÁ SER REAJUSTADO SIGNIFICATIVAMENTE!!!
 # Empezar probando valores entre 0.4 y 0.7 quizás.
-COSINE_THRESHOLD = 0.5 # Valor inicial, necesita ajuste empírico.
+COSINE_THRESHOLD = 0.3  # Valor inicial, necesita ajuste empírico.
 
 
 def bandpass_filter(y, sr, low=300, high=3400, order=4):
@@ -36,7 +35,9 @@ def bandpass_filter(y, sr, low=300, high=3400, order=4):
     b, a = butter(order, [low/nyq, high/nyq], btype='band')
     return lfilter(b, a, y)
 
-# Reducción de ruido espectral (Spectral Subtraction) 
+# Reducción de ruido espectral (Spectral Subtraction)
+
+
 def reduce_noise(y, sr, n_fft=N_FFT, hop_length=HOP_LENGTH, noise_duration=0.5, prop_decrease=1.0):
     stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
     mag, phase = np.abs(stft), np.angle(stft)
@@ -62,12 +63,11 @@ def apply_vad(y, sr, top_db=20, frame_length=2048, hop_length=512):
     return np.concatenate([y[start:end] for start, end in intervals]) if len(intervals) else np.array([])
 
 
-
-
-def normalize_frames(m,epsilon=1e-8):
+def normalize_frames(m, epsilon=1e-8):
     # Normalización por enunciado (CMVN simple): restar la media y dividir por std
     # m: matriz de características (ej: MFCCs) de tamaño (n_features, n_frames)
-    return (m - np.mean(m, axis=1, keepdims=True)) / (np.std(m, axis=1, keepdims=True) + epsilon)
+    # return (m - np.mean(m, axis=1, keepdims=True)) / (np.std(m, axis=1, keepdims=True) + epsilon)
+    return m - np.mean(m, axis=1, keepdims=True)
 
 def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_FFT, hop_length=HOP_LENGTH, silence_thresh=SILENCE_THRESHOLD_DB):
     """
@@ -97,7 +97,7 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
         if file_sr != sr:
             y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
         current_sr = sr
-        
+
         # 2. Voice Activity Detection (VAD)
         y = apply_vad(y, current_sr,
                       top_db=silence_thresh,
@@ -106,28 +106,32 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
         if y.size == 0:
             logging.warning("VAD eliminó toda la señal.")
             return None
-        
+
         # 3. Reducción de ruido
         y = reduce_noise(y, sr,
                          n_fft=n_fft,
                          hop_length=hop_length,
                          noise_duration=0.5,
                          prop_decrease=1.0)
-        
+
         # 4. Aplicamos el filtro de banda
         y = bandpass_filter(y, current_sr)
 
         # 5. Recorte de silencios iniciales/finales
-        y_trimmed, index = librosa.effects.trim(y, top_db=silence_thresh, frame_length=n_fft, hop_length=hop_length)
-        logging.info(f"Audio original: {len(y)/current_sr:.2f}s. Recortado: {len(y_trimmed)/current_sr:.2f}s.")
+        y_trimmed, index = librosa.effects.trim(
+            y, top_db=silence_thresh, frame_length=n_fft, hop_length=hop_length)
+        logging.info(
+            f"Audio original: {len(y)/current_sr:.2f}s. Recortado: {len(y_trimmed)/current_sr:.2f}s.")
 
         # Verificar si queda audio después del recorte
-        if len(y_trimmed) < n_fft: # Necesita al menos una ventana FFT
-             logging.warning(f"Audio en {audio_path} es demasiado corto o silencioso después del recorte.")
+        if len(y_trimmed) < n_fft:  # Necesita al menos una ventana FFT
+             logging.warning(
+                 f"Audio en {audio_path} es demasiado corto o silencioso después del recorte.")
              return None
 
         # 6. Extraer MFCCs base
-        mfccs = librosa.feature.mfcc(y=y_trimmed, sr=current_sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
+        mfccs = librosa.feature.mfcc(
+            y=y_trimmed, sr=current_sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
 
         # 7. Calcular Deltas y Delta-Deltas
         delta_mfccs = librosa.feature.delta(mfccs)
@@ -135,24 +139,25 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
 
         # Verificar si se obtuvieron suficientes frames
         if mfccs.shape[1] == 0 or delta_mfccs.shape[1] == 0 or delta2_mfccs.shape[1] == 0:
-            logging.warning(f"No se pudieron extraer suficientes frames de características de {audio_path}.")
+            logging.warning(
+                f"No se pudieron extraer suficientes frames de características de {audio_path}.")
             return None
 
-        # # 8. Aplicar Normalización Cepstral (CMVN por enunciado simple)
-        # mfccs_norm = normalize_frames(mfccs)
-        # delta_mfccs_norm = normalize_frames(delta_mfccs)
-        # delta2_mfccs_norm = normalize_frames(delta2_mfccs)
 
-        # 9. Calcular Media y Desviación Estándar de cada tipo de característica
-        mean_mfccs = np.mean(mfccs, axis=1)
-        std_mfccs = np.std(mfccs, axis=1)
-        mean_delta = np.mean(delta_mfccs, axis=1)
-        std_delta = np.std(delta_mfccs, axis=1)
-        mean_delta2 = np.mean(delta2_mfccs, axis=1)
-        std_delta2 = np.std(delta2_mfccs, axis=1)
+        # 8. Aplicar Normalización Cepstral (SOLO MEDIA)
+        mfccs_cms = normalize_frames(mfccs) # normalize_frames ahora solo hace CMS
+        delta_mfccs_cms = normalize_frames(delta_mfccs)
+        delta2_mfccs_cms = normalize_frames(delta2_mfccs)
+
+        # 9. Calcular Media y Desviación Estándar de cada tipo de característica normalizada en media
+        mean_mfccs = np.mean(mfccs_cms, axis=1)    # Será cercano a 0
+        std_mfccs = np.std(mfccs_cms, axis=1)      # ¡Ahora SÍ variará entre audios!
+        mean_delta = np.mean(delta_mfccs_cms, axis=1)
+        std_delta = np.std(delta_mfccs_cms, axis=1)
+        mean_delta2 = np.mean(delta2_mfccs_cms, axis=1)
+        std_delta2 = np.std(delta2_mfccs_cms, axis=1)
 
         # 10. Concatenar todo en una única huella vocal
-        # Tamaño: (n_mfcc * 2) + (n_mfcc * 2) + (n_mfcc * 2) = n_mfcc * 6
         fingerprint = np.concatenate((
             mean_mfccs, std_mfccs,
             mean_delta, std_delta,
@@ -161,7 +166,8 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
 
         # Verificar si hay NaNs (podría ocurrir si std es cero en normalize_frames)
         if np.isnan(fingerprint).any():
-            logging.error(f"NaN detectado en la huella final de {audio_path}. Posiblemente audio constante o muy corto.")
+            logging.error(
+                f"NaN detectado en la huella final de {audio_path}. Posiblemente audio constante o muy corto.")
             return None
 
         return fingerprint
