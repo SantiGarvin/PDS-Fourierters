@@ -138,18 +138,18 @@ def compute_vocal_fingerprint(audio_path, sr=DEFAULT_SR, n_mfcc=N_MFCC, n_fft=N_
             logging.warning(f"No se pudieron extraer suficientes frames de características de {audio_path}.")
             return None
 
-        # 8. Aplicar Normalización Cepstral (CMVN por enunciado simple)
-        mfccs_norm = normalize_frames(mfccs)
-        delta_mfccs_norm = normalize_frames(delta_mfccs)
-        delta2_mfccs_norm = normalize_frames(delta2_mfccs)
+        # # 8. Aplicar Normalización Cepstral (CMVN por enunciado simple)
+        # mfccs_norm = normalize_frames(mfccs)
+        # delta_mfccs_norm = normalize_frames(delta_mfccs)
+        # delta2_mfccs_norm = normalize_frames(delta2_mfccs)
 
-        # 9. Calcular Media y Desviación Estándar de cada tipo de característica normalizada
-        mean_mfccs = np.mean(mfccs_norm, axis=1)
-        std_mfccs = np.std(mfccs_norm, axis=1)
-        mean_delta = np.mean(delta_mfccs_norm, axis=1)
-        std_delta = np.std(delta_mfccs_norm, axis=1)
-        mean_delta2 = np.mean(delta2_mfccs_norm, axis=1)
-        std_delta2 = np.std(delta2_mfccs_norm, axis=1)
+        # 9. Calcular Media y Desviación Estándar de cada tipo de característica
+        mean_mfccs = np.mean(mfccs, axis=1)
+        std_mfccs = np.std(mfccs, axis=1)
+        mean_delta = np.mean(delta_mfccs, axis=1)
+        std_delta = np.std(delta_mfccs, axis=1)
+        mean_delta2 = np.mean(delta2_mfccs, axis=1)
+        std_delta2 = np.std(delta2_mfccs, axis=1)
 
         # 10. Concatenar todo en una única huella vocal
         # Tamaño: (n_mfcc * 2) + (n_mfcc * 2) + (n_mfcc * 2) = n_mfcc * 6
