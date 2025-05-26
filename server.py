@@ -190,22 +190,39 @@ def verify():
         model = load_user_model(user_id)
 
         if model:
-            score = model.decision_function(test_fingerprint.reshape(1, -1))[0]
-            verified = score > 0  # OneClassSVM: positivo 
-            distance = score      
+            model_path = os.path.join("models", f"{user_id}_svm.pkl")
+            scaler_path = os.path.join("models", f"{user_id}_scaler.pkl")
+
+            if os.path.exists(model_path) and os.path.exists(scaler_path):
+                model = joblib.load(model_path)
+                scaler = joblib.load(scaler_path)
+                test_fingerprint_scaled = scaler.transform(test_fingerprint.reshape(1, -1))
+                score = model.decision_function(test_fingerprint_scaled)[0]
+                verified = score > 0  # SVM positivo
+                distance = score
+                
+                # Asegurarse de que los tipos son serializables para JSON
+                verified_bool = bool(verified)
+                # Manejar distancia infinita si la comparación falló internamente
+                distance_float = float('inf') if np.isinf(distance) else float(distance)
+
+                logging.info(f'Usuario: {user_id} - Verificado: {verified_bool} - SVM Score: {distance_float:.4f}')
+      
         else:
             # Fallback: usar comparación por coseno si no hay modelo
             # Comparamos ambas huellas vocales usando la distancia Coseno
             # Usamos el umbral definido en asv.py (COSINE_THRESHOLD)
             verified, distance = asv.compare_vocal_fingerprints(registered_fingerprint, test_fingerprint)
             
-        # Asegurarse de que los tipos son serializables para JSON
+            # Asegurarse de que los tipos son serializables para JSON
         verified_bool = bool(verified)
         # Manejar distancia infinita si la comparación falló internamente
         distance_float = float('inf') if np.isinf(distance) else float(distance)
 
         logging.info(f'Usuario: {user_id} - Verificado: {verified_bool} - Distancia Coseno: {distance_float:.4f} (Umbral: {asv.COSINE_THRESHOLD})')
 
+            
+        
         return jsonify({"verified": verified_bool, "distance": distance_float})
 
     except Exception as e:
